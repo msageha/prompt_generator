@@ -9,22 +9,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/go-git/go-git/plumbing/format/gitignore"
 )
 
-// 無視するディレクトリ名
-var ignoreDirs = []string{}
-
-func printHelp() {
-	fmt.Println("Usage options:")
-	flag.PrintDefaults()
-}
-
-func exitWithError(message string) {
-	fmt.Fprintln(os.Stderr, "エラー:", message)
-	os.Exit(1)
-}
-
-// カスタムフラグ型：複数回 -e を指定可能、カンマ区切りでもOK
 type extensionsFlag []string
 
 func (e *extensionsFlag) String() string {
@@ -43,8 +31,18 @@ func (e *extensionsFlag) Set(value string) error {
 	return nil
 }
 
+func printHelp() {
+	fmt.Println("Usage options:")
+	flag.PrintDefaults()
+}
+
+func exitWithError(message string) {
+	fmt.Fprintln(os.Stderr, "エラー:", message)
+	os.Exit(1)
+}
+
 // ディレクトリ内のテキストファイルの内容を収集
-func collectFilesContent(absInputPath string, targetExtensions []string) (map[string]string, error) {
+func collectFilesContent(absInputPath string, targetExtensions []string, matcher gitignore.Matcher) (map[string]string, error) {
 	filesContent := make(map[string]string)
 
 	err := filepath.Walk(absInputPath, func(path string, info os.FileInfo, err error) error {
@@ -53,20 +51,34 @@ func collectFilesContent(absInputPath string, targetExtensions []string) (map[st
 			return nil
 		}
 
-		// 隠しファイルを無視する
-		if strings.HasPrefix(info.Name(), ".") {
+		// 相対パスを取得してmatcherで判定
+		relPath, err := filepath.Rel(absInputPath, path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "相対パス取得エラー: %v\n", err)
 			return nil
 		}
 
-		// ディレクトリを無視する
-		if info.IsDir() {
-			if slices.Contains(ignoreDirs, info.Name()) {
+		// matcherで無視判定
+		if matcher != nil && matcher.Match(strings.Split(relPath, string(os.PathSeparator)), info.IsDir()) {
+			// ディレクトリなら以降探索をスキップ
+			if info.IsDir() {
 				return filepath.SkipDir
 			}
+			// ファイルならこのファイルは無視
 			return nil
 		}
 
-		// 拡張子が一致するファイルを処理
+		// 隠しファイルを無視する
+		if strings.HasPrefix(info.Name(), ".") && info.Name() != ".gitignore" {
+			return nil
+		}
+
+		// ディレクトリは継続
+		if info.IsDir() {
+			return nil
+		}
+
+		// 拡張子が一致しなければスキップ
 		if !slices.Contains(targetExtensions, filepath.Ext(path)) {
 			return nil
 		}
@@ -104,6 +116,38 @@ func createPrompt(filesContent map[string]string, instructions string) string {
 	return promptBuilder.String()
 }
 
+func loadGitignorePatterns(gitignorePath string) (gitignore.Matcher, error) {
+	// .gitignoreがない場合はnilを返す
+	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	file, err := os.Open(gitignorePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	ps := make([]gitignore.Pattern, 0)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// 空行やコメント行はスキップ
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		ps = append(ps, gitignore.ParsePattern(line, nil))
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return gitignore.NewMatcher(ps), nil
+}
+
 func main() {
 	var exts extensionsFlag
 	flag.Var(&exts, "e", "対象の拡張子（例：-e .py -e .go あるいは -e .py,.go）")
@@ -116,20 +160,22 @@ func main() {
 		return
 	}
 
-	// -eフラグが一度も指定されなかった場合のデフォルト処理
 	if len(exts) == 0 {
-		// デフォルトで .py を対象とする
 		exts = []string{".py"}
 	}
 
-	// 入力ディレクトリの絶対パスを取得
 	absInputPath, err := filepath.Abs(*inputPath)
 	if err != nil {
 		exitWithError(fmt.Sprintf("入力パスの解析に失敗しました: %v", err))
 	}
 
-	// ディレクトリ内のファイル内容を取得
-	filesContent, err := collectFilesContent(absInputPath, exts)
+	// .gitignoreを読み込み
+	matcher, err := loadGitignorePatterns(filepath.Join(absInputPath, ".gitignore"))
+	if err != nil {
+		exitWithError(fmt.Sprintf(".gitignoreの読み込みに失敗しました: %v", err))
+	}
+
+	filesContent, err := collectFilesContent(absInputPath, exts, matcher)
 	if err != nil {
 		exitWithError(fmt.Sprintf("ファイル内容の収集中にエラーが発生しました: %v", err))
 	}
@@ -138,7 +184,6 @@ func main() {
 		exitWithError("有効なファイルが見つかりませんでした")
 	}
 
-	// 標準入力から指示文を読み込み
 	fmt.Println("変更の指示文を入力してください（Ctrl+Dで終了）:")
 	scanner := bufio.NewScanner(os.Stdin)
 	var instructions bytes.Buffer
@@ -153,6 +198,5 @@ func main() {
 	}
 
 	finalPrompt := createPrompt(filesContent, instructions.String())
-
 	fmt.Println(finalPrompt)
 }
