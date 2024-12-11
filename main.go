@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-
-	clipboard "golang.design/x/clipboard"
 )
 
 // 無視するディレクトリ名
@@ -26,17 +24,23 @@ func exitWithError(message string) {
 	os.Exit(1)
 }
 
-// 入力された拡張子リストを正規化（ドットを付ける）
-func normalizeExtensions(extList string) []string {
-	extensions := strings.Split(extList, ",")
-	for i, ext := range extensions {
-		ext = strings.TrimSpace(ext)
-		if !strings.HasPrefix(ext, ".") {
-			ext = "." + ext
+// カスタムフラグ型：複数回 -e を指定可能、カンマ区切りでもOK
+type extensionsFlag []string
+
+func (e *extensionsFlag) String() string {
+	return strings.Join(*e, ", ")
+}
+
+func (e *extensionsFlag) Set(value string) error {
+	parts := strings.Split(value, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if !strings.HasPrefix(p, ".") {
+			p = "." + p
 		}
-		extensions[i] = ext
+		*e = append(*e, p)
 	}
-	return extensions
+	return nil
 }
 
 // ディレクトリ内のテキストファイルの内容を収集
@@ -100,20 +104,10 @@ func createPrompt(filesContent map[string]string, instructions string) string {
 	return promptBuilder.String()
 }
 
-// copyToClipboard は指定された文字列をクリップボードにコピーします。
-func copyToClipboard(content string) error {
-	err := clipboard.Init()
-	if err != nil {
-		return err
-	}
-
-	clipboard.Write(clipboard.FmtText, []byte(content))
-	return nil
-}
-
 func main() {
+	var exts extensionsFlag
+	flag.Var(&exts, "e", "対象の拡張子（例：-e .py -e .go あるいは -e .py,.go）")
 	inputPath := flag.String("p", "./", "入力ディレクトリのパス (絶対パスまたは相対パス)")
-	targetExtensions := flag.String("e", ".py", "対象の拡張子 (カンマ区切りで複数指定可能)")
 	showHelp := flag.Bool("h", false, "ヘルプメッセージを表示")
 	flag.Parse()
 
@@ -122,17 +116,20 @@ func main() {
 		return
 	}
 
+	// -eフラグが一度も指定されなかった場合のデフォルト処理
+	if len(exts) == 0 {
+		// デフォルトで .py を対象とする
+		exts = []string{".py"}
+	}
+
 	// 入力ディレクトリの絶対パスを取得
 	absInputPath, err := filepath.Abs(*inputPath)
 	if err != nil {
 		exitWithError(fmt.Sprintf("入力パスの解析に失敗しました: %v", err))
 	}
 
-	// 拡張子リストを正規化
-	extensions := normalizeExtensions(*targetExtensions)
-
 	// ディレクトリ内のファイル内容を取得
-	filesContent, err := collectFilesContent(absInputPath, extensions)
+	filesContent, err := collectFilesContent(absInputPath, exts)
 	if err != nil {
 		exitWithError(fmt.Sprintf("ファイル内容の収集中にエラーが発生しました: %v", err))
 	}
@@ -151,7 +148,7 @@ func main() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "error reading standard input: %v\n", err)
+		fmt.Fprintf(os.Stderr, "標準入力読み取りエラー: %v\n", err)
 		os.Exit(1)
 	}
 
