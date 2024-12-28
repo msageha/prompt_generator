@@ -51,25 +51,33 @@ func collectFilesContent(absInputPath string, targetExtensions []string, matcher
 			return nil
 		}
 
-		// 相対パスを取得してmatcherで判定
+		// 相対パスを取得して matcher で判定
 		relPath, err := filepath.Rel(absInputPath, path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "相対パス取得エラー: %v\n", err)
 			return nil
 		}
 
-		// matcherで無視判定
+		// 隠しディレクトリ or 隠しファイルは無視（ただし .gitignore は例外）
+		if strings.HasPrefix(info.Name(), ".") {
+			// ディレクトリを無視する場合は SkipDir を返す
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			// ファイルの場合も .gitignore 以外は無視
+			if info.Name() != ".gitignore" {
+				return nil
+			}
+		}
+
+		// matcher で無視判定
+		// (隠しファイル/ディレクトリは上記で既にスキップ済み)
 		if matcher != nil && matcher.Match(strings.Split(relPath, string(os.PathSeparator)), info.IsDir()) {
 			// ディレクトリなら以降探索をスキップ
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
-			// ファイルならこのファイルは無視
-			return nil
-		}
-
-		// 隠しファイルを無視する
-		if strings.HasPrefix(info.Name(), ".") && info.Name() != ".gitignore" {
+			// ファイルなら無視
 			return nil
 		}
 
@@ -78,9 +86,12 @@ func collectFilesContent(absInputPath string, targetExtensions []string, matcher
 			return nil
 		}
 
-		// 拡張子が一致しなければスキップ
-		if !slices.Contains(targetExtensions, filepath.Ext(path)) {
-			return nil
+		// もし拡張子リストに "." が含まれていたら、すべてのファイルを対象
+		// 含まれていなければ、通常通り拡張子チェックを行う
+		if !slices.Contains(targetExtensions, ".") {
+			if !slices.Contains(targetExtensions, filepath.Ext(path)) {
+				return nil
+			}
 		}
 
 		// ファイル内容を読み取る
@@ -160,6 +171,7 @@ func main() {
 		return
 	}
 
+	// デフォルト拡張子を設定 (.py)。ただし -e . と指定された場合は全ファイル対象。
 	if len(exts) == 0 {
 		exts = []string{".py"}
 	}
