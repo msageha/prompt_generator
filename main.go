@@ -9,8 +9,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/go-git/go-git/plumbing/format/gitignore"
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/unicode"
 )
 
 type extensionsFlag []string
@@ -41,8 +45,71 @@ func exitWithError(message string) {
 	os.Exit(1)
 }
 
+// getEncodingByName returns an encoding.Encoding by name
+func getEncodingByName(name string) (encoding.Encoding, error) {
+	switch strings.ToLower(name) {
+	case "shift-jis", "shiftjis", "sjis":
+		return japanese.ShiftJIS, nil
+	case "euc-jp", "eucjp":
+		return japanese.EUCJP, nil
+	case "iso-2022-jp", "iso2022jp":
+		return japanese.ISO2022JP, nil
+	case "utf-16le":
+		return unicode.UTF16(unicode.LittleEndian, unicode.UseBOM), nil
+	case "utf-16be":
+		return unicode.UTF16(unicode.BigEndian, unicode.UseBOM), nil
+	case "utf-8", "utf8":
+		return unicode.UTF8, nil
+	default:
+		return nil, fmt.Errorf("サポートされていないエンコーディング: %s", name)
+	}
+}
+
+// detectAndConvertEncoding attempts to detect the encoding of the given data and convert it to UTF-8
+func detectAndConvertEncoding(data []byte, encodingName string) (string, error) {
+	// If encoding is specified, use that
+	if encodingName != "" {
+		enc, err := getEncodingByName(encodingName)
+		if err != nil {
+			return "", fmt.Errorf("指定されたエンコーディング '%s' が見つかりません: %v", encodingName, err)
+		}
+		decoder := enc.NewDecoder()
+		result, err := decoder.Bytes(data)
+		if err != nil {
+			return "", fmt.Errorf("指定されたエンコーディング '%s' でデコードできませんでした: %v", encodingName, err)
+		}
+		return string(result), nil
+	}
+
+	// First check if it's already valid UTF-8
+	if utf8.Valid(data) {
+		return string(data), nil
+	}
+
+	// Try common encodings
+	encodings := []encoding.Encoding{
+		japanese.ShiftJIS,
+		japanese.EUCJP,
+		japanese.ISO2022JP,
+		unicode.UTF16(unicode.LittleEndian, unicode.UseBOM),
+		unicode.UTF16(unicode.BigEndian, unicode.UseBOM),
+	}
+
+	for _, enc := range encodings {
+		decoder := enc.NewDecoder()
+		result, err := decoder.Bytes(data)
+		if err == nil && utf8.Valid(result) {
+			return string(result), nil
+		}
+	}
+
+	// If we can't determine the encoding, just return as is with a warning
+	fmt.Fprintf(os.Stderr, "警告: ファイルのエンコーディングを検出できませんでした。UTF-8として処理します。\n")
+	return string(data), nil
+}
+
 // ディレクトリ内のテキストファイルの内容を収集
-func collectFilesContent(absInputPath string, targetExtensions []string, matcher gitignore.Matcher) (map[string]string, error) {
+func collectFilesContent(absInputPath string, targetExtensions []string, matcher gitignore.Matcher, encodingName string) (map[string]string, error) {
 	filesContent := make(map[string]string)
 
 	err := filepath.Walk(absInputPath, func(path string, info os.FileInfo, err error) error {
@@ -100,7 +167,14 @@ func collectFilesContent(absInputPath string, targetExtensions []string, matcher
 			fmt.Fprintf(os.Stderr, "ファイル読み取りエラー: %v\n", err)
 			return nil
 		}
-		filesContent[path] = string(data)
+
+		// エンコーディング検出と変換
+		content, err := detectAndConvertEncoding(data, encodingName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "エンコーディング変換エラー (%s): %v\n", path, err)
+			return nil
+		}
+		filesContent[path] = content
 
 		return nil
 	})
@@ -163,6 +237,7 @@ func main() {
 	var exts extensionsFlag
 	flag.Var(&exts, "e", "対象の拡張子（例：-e .py -e .go あるいは -e .py,.go）")
 	inputPath := flag.String("p", "./", "入力ディレクトリのパス (絶対パスまたは相対パス)")
+	encodingName := flag.String("encoding", "", "入力ファイルのエンコーディング（例：shift-jis, euc-jp, iso-2022-jp）。指定がなければ自動検出を試みます。")
 	showHelp := flag.Bool("h", false, "ヘルプメッセージを表示")
 	flag.Parse()
 
@@ -187,7 +262,7 @@ func main() {
 		exitWithError(fmt.Sprintf(".gitignoreの読み込みに失敗しました: %v", err))
 	}
 
-	filesContent, err := collectFilesContent(absInputPath, exts, matcher)
+	filesContent, err := collectFilesContent(absInputPath, exts, matcher, *encodingName)
 	if err != nil {
 		exitWithError(fmt.Sprintf("ファイル内容の収集中にエラーが発生しました: %v", err))
 	}

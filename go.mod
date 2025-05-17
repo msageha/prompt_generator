@@ -2,7 +2,10 @@ module github.com/msageha/prompt_generator
 
 go 1.23.4
 
-require github.com/go-git/go-git v4.7.0+incompatible
+require (
+	github.com/go-git/go-git v4.7.0+incompatible
+	golang.org/x/text v0.25.0
+)
 
 require (
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
